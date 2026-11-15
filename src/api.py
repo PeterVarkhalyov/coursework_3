@@ -74,12 +74,8 @@ class AbstractAircraftAPI(AbstractAPIClient):
     """Абстрактный API-клиент для получения состояний воздушных судов."""
 
     @abstractmethod
-    def get_data(
-        self,
-        bounding_box: BoundingBox,
-        airborne_only: bool = True,
-    ) -> tuple[int, list[AircraftState]]:
-        """Получить время сервера и воздушные суда в заданных границах."""
+    def get_data(self) -> tuple[int, list[AircraftState]]:
+        """Получить время сервера и все наблюдаемые воздушные суда."""
 
 
 class NominatimAPI(AbstractCountryAPI):
@@ -135,6 +131,21 @@ class NominatimAPI(AbstractCountryAPI):
                 "accept-language": "ru,en",
             },
         )
+        # Структурированный параметр country не всегда находит локализованные
+        # названия (например, «Швейцария»), поэтому повторяем поиск в свободной
+        # форме. featureType по-прежнему ограничивает результат страной.
+        if not isinstance(response, list) or not response:
+            response = self._request(
+                "search",
+                {
+                    "q": country_name,
+                    "format": "jsonv2",
+                    "limit": "1",
+                    "addressdetails": "1",
+                    "featureType": "country",
+                    "accept-language": "ru,en",
+                },
+            )
         if not isinstance(response, list) or not response or not isinstance(response[0], dict):
             raise APIError(f"Страна не найдена: {country_name}")
 
@@ -175,16 +186,14 @@ class NominatimAPI(AbstractCountryAPI):
 
 
 class OpenSkyAPI(AbstractAircraftAPI):
-    """Класс OpenSkyAPI предназначен для получения информации о воздушных судах,
-        находящихся в заданных географических границах
+    """Получает текущий глобальный снимок воздушных судов OpenSky.
 
     Attributes: не создаёт собственных атрибутов, использует атрибуты, унаследованные от AbstractAPIClient
 
     Methods:
         __init__(): конструктор вызывает родительский класс
         connect(): метод реализует обязательный абстрактный метод родительского класса
-        get_data(): главный публичный метод класса - получает географические границы и
-            возвращает список воздушных судов.
+        get_data(): возвращает все воздушные суда, наблюдаемые OpenSky в текущий момент
         _parse_aircraft(): внутренний статический метод, преобразующий массив OpenSky в объект AircraftState
         _to_float(): безопасно преобразует значение в float
         _to_int(): безопасно преобразует значение в int
@@ -198,10 +207,10 @@ class OpenSkyAPI(AbstractAircraftAPI):
         # OpenSky разрешает анонимные запросы, поэтому отдельная авторизация не нужна.
         return True
 
-    def get_data(self, bounding_box: BoundingBox, airborne_only: bool = True) -> tuple[int, list[AircraftState]]:
-        params: dict[str, str | int] = {"extended": 1}
-        params.update(bounding_box.to_query_params())
-        response = self._request_json("states/all", params)
+    def get_data(self) -> tuple[int, list[AircraftState]]:
+        """Вернуть текущий снимок всех воздушных судов из OpenSky."""
+
+        response = self._request_json("states/all")
         if not isinstance(response, dict):
             raise APIError("OpenSky вернул неожиданный ответ")
 
@@ -216,13 +225,7 @@ class OpenSkyAPI(AbstractAircraftAPI):
         aircraft: list[AircraftState] = []
         for item in states:
             state = self._parse_aircraft(item)
-            if state is None:
-                continue
-            if airborne_only and state.on_ground:
-                continue
-            if state.latitude is None or state.longitude is None:
-                continue
-            if bounding_box.contains(state.latitude, state.longitude):
+            if state is not None:
                 aircraft.append(state)
         return server_time, aircraft
 
@@ -232,7 +235,7 @@ class OpenSkyAPI(AbstractAircraftAPI):
             return None
         if not isinstance(item[0], str) or not isinstance(item[2], str):
             return None
-        if item[5] is None or item[6] is None or not isinstance(item[8], bool):
+        if not isinstance(item[8], bool):
             return None
 
         try:

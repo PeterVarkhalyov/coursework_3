@@ -1,0 +1,214 @@
+format_version = 1
+
+[database]
+dialect = "aircraft"
+schema = "public"
+encoding = "UTF8"
+
+# ============================================================
+# Справочник стран
+# Создаётся первым, поскольку на него ссылаются остальные таблицы.
+# ============================================================
+
+[[tables]]
+name = "countries"
+
+columns = [
+    { name = "alpha_2",       data_type = "VARCHAR(2)",   nullable = false, primary_key = true },
+    { name = "alpha_3",       data_type = "VARCHAR(3)",   nullable = false },
+    { name = "country_name",  data_type = "TEXT",         nullable = false },
+    { name = "country_code",  data_type = "INTEGER",      nullable = false },
+    { name = "country_flag",  data_type = "VARCHAR(255)", nullable = false },
+    { name = "official_name", data_type = "TEXT",         nullable = true },
+    { name = "common_name",   data_type = "TEXT",         nullable = true },
+    { name = "created_at",    data_type = "TIMESTAMPTZ",  nullable = false, default = "CURRENT_TIMESTAMP" },
+]
+
+indexes = []
+
+# ============================================================
+# Справочник самолётов
+# ============================================================
+
+[[tables]]
+name = "aircrafts"
+
+columns = [
+    { name = "icao24",          data_type = "VARCHAR(255)",    nullable = false, primary_key = true },
+    { name = "callsign",        data_type = "VARCHAR(255)",    nullable = true },
+    { name = "country",         data_type = "VARCHAR(2)",      nullable = false, references = { table = "public.countries", column = "alpha_2" } },
+    { name = "origin_country",  data_type = "VARCHAR(2)",      nullable = false, references = { table = "public.countries", column = "alpha_2" } },
+    { name = "time_position",   data_type = "BIGINT",          nullable = true },
+    { name = "last_contact",    data_type = "BIGINT",          nullable = false },
+    { name = "longitude",       data_type = "NUMERIC(32,18)",  nullable = false },
+    { name = "latitude",        data_type = "NUMERIC(32,18)",  nullable = false },
+    { name = "baro_altitude",   data_type = "NUMERIC(32,18)",  nullable = true },
+    { name = "on_ground",       data_type = "BOOLEAN",         nullable = false, default = "TRUE" },
+    { name = "velocity",        data_type = "NUMERIC(32,18)",  nullable = true },
+    { name = "true_track",      data_type = "NUMERIC(32,18)",  nullable = true },
+    { name = "vertical_rate",   data_type = "NUMERIC(32,18)",  nullable = true },
+    { name = "sensors",         data_type = "JSONB",           nullable = true, default = "'{}'::jsonb" },
+    { name = "geo_altitude",    data_type = "NUMERIC(32,18)",  nullable = true },
+    { name = "squawk",          data_type = "VARCHAR(255)",    nullable = true },
+    { name = "spi",             data_type = "BOOLEAN",         nullable = false, default = "FALSE" },
+    { name = "position_source", data_type = "INTEGER",         nullable = true },
+    { name = "created_at",      data_type = "TIMESTAMPTZ",     nullable = false, default = "CURRENT_TIMESTAMP" },
+]
+
+indexes = []
+
+# ============================================================
+# Справочник обрабатываемых стран
+# ============================================================
+
+[[tables]]
+name = "selected_countries"
+
+columns = [
+    { name = "id",         data_type = "SERIAL",       nullable = false, primary_key = true },
+    { name = "alpha_2",    data_type = "VARCHAR(2)",   nullable = false, references = { table = "public.countries", column = "alpha_2" } },
+    { name = "active",     data_type = "BOOLEAN",      nullable = false, default = "TRUE" },
+    { name = "created_at", data_type = "TIMESTAMPTZ",  nullable = false, default = "CURRENT_TIMESTAMP" },
+]
+
+indexes = [
+    { name = "uq_selected_countries_active_alpha_2", unique = true, columns = ["alpha_2"], where = "active IS TRUE" },
+]
+
+# ============================================================
+# Справочник координат стран
+# ============================================================
+
+[[tables]]
+name = "country_coordinates"
+
+columns = [
+    { name = "id",         data_type = "SERIAL",          nullable = false, primary_key = true },
+    { name = "alpha_2",    data_type = "VARCHAR(2)",      nullable = false, references = { table = "public.countries", column = "alpha_2" } },
+    { name = "active",     data_type = "BOOLEAN",         nullable = false, default = "TRUE" },
+    { name = "latitude",   data_type = "NUMERIC(32,18)",  nullable = false },
+    { name = "longitude",  data_type = "NUMERIC(32,18)",  nullable = false },
+    { name = "north",      data_type = "NUMERIC(32,18)",  nullable = false },
+    { name = "south",      data_type = "NUMERIC(32,18)",  nullable = false },
+    { name = "east",       data_type = "NUMERIC(32,18)",  nullable = false },
+    { name = "west",       data_type = "NUMERIC(32,18)",  nullable = false },
+    { name = "created_at", data_type = "TIMESTAMPTZ",     nullable = false, default = "CURRENT_TIMESTAMP" },
+]
+
+indexes = [
+    { name = "uq_country_coordinates_active_alpha_2", unique = true, columns = ["alpha_2"], where = "active IS TRUE" },
+]
+
+# ============================================================
+# Триггерная функция для selected_countries
+# ============================================================
+
+[[functions]]
+name = "deactivate_previous_country"
+replace = true
+returns = "TRIGGER"
+language = "plpgsql"
+
+body = '''
+BEGIN
+    IF NEW.active IS TRUE THEN
+        -- Последовательная обработка одинакового alpha_2
+        PERFORM pg_advisory_xact_lock(
+            hashtextextended(NEW.alpha_2, 0)
+        );
+
+        UPDATE public.selected_countries
+        SET active = FALSE
+        WHERE alpha_2 = NEW.alpha_2
+          AND active IS TRUE
+          AND id IS DISTINCT FROM NEW.id;
+    END IF;
+
+    RETURN NEW;
+END;
+'''
+
+# ============================================================
+# Триггерная функция версионирования координат
+# ============================================================
+
+[[functions]]
+name = "add_country_version"
+replace = true
+returns = "TRIGGER"
+language = "plpgsql"
+
+body = '''
+DECLARE
+    current_record public.country_coordinates%ROWTYPE;
+BEGIN
+    -- Неактивные записи добавляются без проверки.
+    IF NEW.active IS NOT TRUE THEN
+        RETURN NEW;
+    END IF;
+
+    -- Последовательная обработка одинакового alpha_2.
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(NEW.alpha_2, 0)
+    );
+
+    SELECT c.*
+    INTO current_record
+    FROM public.country_coordinates AS c
+    WHERE c.alpha_2 = NEW.alpha_2
+      AND c.active IS TRUE
+    LIMIT 1
+    FOR UPDATE;
+
+    IF FOUND THEN
+        -- Если координаты не изменились, новая запись не добавляется.
+        IF ROW(
+            current_record.latitude,
+            current_record.longitude,
+            current_record.north,
+            current_record.south,
+            current_record.east,
+            current_record.west
+        ) IS NOT DISTINCT FROM ROW(
+            NEW.latitude,
+            NEW.longitude,
+            NEW.north,
+            NEW.south,
+            NEW.east,
+            NEW.west
+        ) THEN
+            RETURN NULL;
+        END IF;
+
+        -- Предыдущая версия становится неактивной.
+        UPDATE public.country_coordinates
+        SET active = FALSE
+        WHERE id = current_record.id;
+    END IF;
+
+    RETURN NEW;
+END;
+'''
+
+# ============================================================
+# Триггеры
+# ============================================================
+
+[[triggers]]
+name = "trg_deactivate_previous_country"
+table = "public.selected_countries"
+timing = "BEFORE"
+events = ["INSERT", "UPDATE"]
+for_each = "ROW"
+when = "NEW.active IS TRUE"
+function = "public.deactivate_previous_country()"
+drop_if_exists = true
+
+[[triggers]]
+name = "trg_add_country_version"
+table = "public.country_coordinates"
+timing = "BEFORE"
+events = ["INSERT"]
+for_each = "ROW"
+function = "public.add_country_version()"
+drop_if_exists = true
