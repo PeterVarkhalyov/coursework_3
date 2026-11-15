@@ -40,6 +40,86 @@ class BoundingBox:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PyCountryData:
+    """Структура страны из справочника ``pycountry.countries``.
+
+    Attributes:
+        name: краткое название страны.
+        alpha_2: двухбуквенный код ISO 3166-1.
+        alpha_3: трёхбуквенный код ISO 3166-1.
+        numeric: трёхзначный цифровой код ISO 3166-1.
+        official_name: официальное название, если оно есть в справочнике.
+        common_name: общеупотребительное название, если оно есть в справочнике.
+        flag: представление флага страны, возвращаемое ``pycountry``.
+    """
+
+    name: str
+    alpha_2: str
+    alpha_3: str
+    numeric: str
+    official_name: str | None = None
+    common_name: str | None = None
+    flag: str | None = None
+
+    def __post_init__(self) -> None:
+        """Нормализовать и проверить поля ISO 3166-1."""
+
+        object.__setattr__(self, "name", self._required_text("name", self.name))
+        object.__setattr__(self, "alpha_2", self._country_code("alpha_2", self.alpha_2, 2))
+        object.__setattr__(self, "alpha_3", self._country_code("alpha_3", self.alpha_3, 3))
+
+        numeric = self._required_text("numeric", self.numeric)
+        if len(numeric) != 3 or not numeric.isdigit():
+            raise ValueError("numeric должен содержать три цифры")
+        object.__setattr__(self, "numeric", numeric)
+
+        for field_name in ("official_name", "common_name", "flag"):
+            value = getattr(self, field_name)
+            object.__setattr__(self, field_name, self._optional_text(field_name, value))
+
+    @classmethod
+    def from_pycountry(cls, country: object) -> "PyCountryData":
+        """Создать модель из объекта, возвращённого ``pycountry``."""
+
+        try:
+            return cls(
+                name=getattr(country, "name"),
+                alpha_2=getattr(country, "alpha_2"),
+                alpha_3=getattr(country, "alpha_3"),
+                numeric=getattr(country, "numeric"),
+                official_name=getattr(country, "official_name", None),
+                common_name=getattr(country, "common_name", None),
+                flag=getattr(country, "flag", None),
+            )
+        except AttributeError as error:
+            raise ValueError("Объект pycountry не содержит обязательные поля страны") from error
+
+    @staticmethod
+    def _required_text(name: str, value: object) -> str:
+        if not isinstance(value, str):
+            raise TypeError(f"{name} должен иметь тип str")
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{name} не может быть пустым")
+        return value
+
+    @classmethod
+    def _country_code(cls, name: str, value: object, length: int) -> str:
+        code = cls._required_text(name, value).upper()
+        if len(code) != length or not code.isalpha() or not code.isascii():
+            raise ValueError(f"{name} должен содержать {length} латинские буквы")
+        return code
+
+    @staticmethod
+    def _optional_text(name: str, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError(f"{name} должен иметь тип str или None")
+        return value.strip() or None
+
+
 @dataclass
 class CountryCoordinates:
     """Название, координаты и границы страны.
@@ -243,15 +323,3 @@ class AircraftState:
     @staticmethod
     def _compare_values(first: float, second: float) -> int:
         return (first > second) - (first < second)
-
-
-@dataclass
-class CountryAirspace:
-    """Страна и найденные в её прямоугольных границах воздушные судна.
-    Attributes:
-        country: объект класса CountryCoordinates, содержащий информацию о выбранной стране
-        aircraft: Список объектов AircraftState, каждый объект содержит сведения об одном воздушном судне
-    """
-
-    country: CountryCoordinates
-    aircraft: list[AircraftState]
